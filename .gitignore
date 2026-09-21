@@ -1,0 +1,12 @@
+# Секреты и боевые значения — никогда не коммитить
+.env
+*.env
+!.env.example
+
+# Файлы, которые генерирует scripts/configure.sh на конкретном сервере
+nginx/nginx.conf
+xray/xray-config.json
+
+# Мусор
+*.bak
+*.log

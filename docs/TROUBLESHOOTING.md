@@ -1,0 +1,218 @@
+# Разбор типовых проблем
+
+Сначала всегда: `./scripts/check.sh`. Он закрывает процентов восемьдесят
+вопросов ниже.
+
+---
+
+## Работает только один инбаунд, остальные молчат
+
+**Симптом.** Одна конфигурация из трёх подключается, две другие — нет,
+хотя ошибок в логах нет.
+
+**Причина.** SNI в `map` не совпадает с `realitySettings.serverNames`
+соответствующего инбаунда. nginx не нашёл совпадения и отправил соединение
+в `default` — то есть в инбаунд TCP. Тот получил чужой Reality-хендшейк,
+не смог его проверить и отдал соединение реальному сайту-маске. Снаружи это
+выглядит как «просто не работает».
+
+**Проверка.**
+
+```bash
+docker exec remnanode-nginx nginx -T | grep -A6 'map \$ssl_preread'
+jq -r '.inbounds[] | "\(.tag) \(.streamSettings.realitySettings.serverNames[0])"' xray/xray-config.json
+```
+
+Значения во втором столбце обязаны совпадать с ключами в `map`.
+
+**Решение.** Привести `.env` в порядок и пересобрать конфиги:
+
+```bash
+./scripts/configure.sh && docker compose restart nginx
+```
+
+Плюс поправить SNI в соответствующем хосте в панели.
+
+---
+
+## Все пользователи в панели онлайн с 127.0.0.1
+
+**Причина.** nginx проксирует с loopback-адреса, а PROXY protocol не
+передаёт настоящий IP.
+
+**Проверка.**
+
+```bash
+docker exec remnanode-nginx nginx -T | grep proxy_protocol
+jq -r '.inbounds[].streamSettings.sockopt.acceptProxyProtocol' xray/xray-config.json
+```
+
+Должно быть `proxy_protocol on;` и три раза `true`.
+
+**Решение.** Включить обе стороны одновременно. Если включена только одна —
+связь ломается полностью:
+
+| nginx | Xray | Результат |
+|---|---|---|
+| `proxy_protocol on` | `acceptProxyProtocol: true` | правильно |
+| `proxy_protocol on` | `false` | Xray видит PROXY-заголовок как мусор в TLS, соединение рвётся |
+| выключен | `true` | Xray ждёт заголовок, не получает, рвёт соединение |
+| выключен | `false` | работает, но все клиенты как `127.0.0.1` |
+
+---
+
+## Соединение рвётся сразу после подключения
+
+Почти всегда это рассинхрон PROXY protocol из таблицы выше. Второй по
+частоте вариант — неверный `shortId` или `publicKey` в хосте панели.
+
+Быстрая локализация: временно поставьте `access_log` в `nginx.conf` и
+посмотрите, доходит ли соединение до нужного бэкенда.
+
+```nginx
+access_log /var/log/nginx/stream.log sni_routing;
+```
+
+```bash
+docker compose restart nginx
+docker exec remnanode-nginx tail -f /var/log/nginx/stream.log
+```
+
+Не забудьте выключить обратно: это лог активности пользователей.
+
+---
+
+## nginx не стартует
+
+```bash
+docker logs remnanode-nginx
+docker exec remnanode-nginx nginx -t
+```
+
+| Сообщение | Что это значит |
+|---|---|
+| `duplicate parameter "домен"` | Два инбаунда получили одинаковый `SNI_*`. Нужны три разных домена. |
+| `bind() to [::]:443 failed` | На сервере отключён IPv6. Закомментируйте строку `listen [::]:443` в `nginx/nginx.conf.template` и перегенерируйте. |
+| `bind() to 0.0.0.0:443 failed (98: Address already in use)` | Порт 443 занят другим сервисом. Смотрите `ss -ltnp \| grep :443` — обычно это apache2, caddy или traefik. |
+| `unknown directive "ssl_preread"` | Образ nginx собран без модуля stream. Используйте официальный `nginx:stable-alpine`, как в `docker-compose.yml`. |
+
+---
+
+## Нода в панели offline
+
+Проверяйте по цепочке:
+
+```bash
+# 1. Контейнер жив?
+docker ps | grep remnanode
+docker logs --tail 50 remnanode
+
+# 2. Порт управления слушается?
+ss -ltnp | grep 2231
+
+# 3. Панель до него достучится? (выполнять НА СЕРВЕРЕ ПАНЕЛИ)
+curl -v telnet://<IP_НОДЫ>:2231
+```
+
+Типичные причины: не заполнен или обрезан `SECRET_KEY`, фаервол не пускает
+IP панели, в панели указан не тот порт.
+
+`SECRET_KEY` копируется целиком, одной строкой, без переносов и кавычек.
+
+---
+
+## Клиент подключается, но сайты не открываются
+
+1. Проверьте, что нода видит интернет: `docker exec remnanode curl -sI https://ifconfig.me`
+2. Посмотрите правила роутинга — в конфиге блокируются приватные адреса и
+   bittorrent. Если вы добавляли свои правила, начните с их отключения.
+3. Проверьте, доступен ли с ноды сайт-маска:
+   `curl -sI https://$SNI_TCP` — Reality проксирует туда чужие соединения,
+   и если сайт недоступен, маскировка работает некорректно.
+
+---
+
+## Reality-хендшейк не проходит
+
+Требования к домену-маске, которые чаще всего нарушают:
+
+* поддержка **TLS 1.3** и **X25519** — обязательна;
+* поддержка **HTTP/2** — желательна;
+* домен **не за CDN** (Cloudflare, Akamai, Fastly): общие сертификаты и
+  плавающие IP ломают маскировку;
+* домен **не заблокирован** в стране пользователей;
+* `target` и `serverNames` указывают на **один и тот же** домен.
+
+Проверка кандидата:
+
+```bash
+openssl s_client -connect example.com:443 -tls1_3 -alpn h2 -brief </dev/null
+```
+
+Должны увидеть `Protocol version: TLSv1.3`, `Ciphersuite`, и в ALPN — `h2`.
+
+Ещё одна частая причина — **разъехавшееся время на сервере**. TLS к этому
+чувствителен:
+
+```bash
+timedatectl status     # должно быть "System clock synchronized: yes"
+```
+
+---
+
+## gRPC или XHTTP ведут себя нестабильно, а TCP работает
+
+PROXY protocol читается на уровне сокета, до HTTP/2, и с gRPC/XHTTP обычно
+работает штатно. Но если вы поймали расхождение именно на этих двух
+инбаундах, проверьте гипотезу прямо:
+
+```bash
+# временно выключить proxy_protocol
+sed -i 's/^\( *\)proxy_protocol  on;/\1# proxy_protocol  on;/' nginx/nginx.conf
+# и одновременно в xray-config.json — acceptProxyProtocol: false во всех инбаундах
+docker compose restart nginx
+```
+
+Если после этого всё заработало — проблема в PROXY protocol, и придётся
+выбирать между реальными IP клиентов и этими двумя транспортами.
+Возвращать частично нельзя: `proxy_protocol` в nginx включается на весь
+слушающий сокет, то есть сразу для всех трёх инбаундов.
+
+Рабочий обходной путь, если реальные IP важнее: оставить на 443 только
+инбаунды, которые с PROXY protocol работают, а проблемный вынести на
+отдельный порт без nginx.
+
+---
+
+## Обновление и обслуживание
+
+```bash
+# Обновить образы ноды и nginx
+docker compose pull && docker compose up -d
+
+# Перечитать конфиг nginx без разрыва соединений
+docker exec remnanode-nginx nginx -s reload
+
+# Логи
+docker logs -f remnanode
+docker logs -f remnanode-nginx
+
+# Полная пересборка конфигов после правки .env
+./scripts/configure.sh && docker compose restart
+```
+
+Ротация логов уже настроена в `docker-compose.yml`: 10 МБ × 3 файла на
+контейнер.
+
+---
+
+## Что проверить перед обращением за помощью
+
+```bash
+./scripts/check.sh                              # общая картина
+docker compose ps                               # состояние контейнеров
+docker exec remnanode-nginx nginx -T | head -60 # фактически загруженный конфиг
+ss -ltnp | grep -E ':(443|4433|5443|8443|2231)\b'
+```
+
+Вывод `check.sh` обычно уже содержит ответ.

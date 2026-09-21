@@ -1,0 +1,125 @@
+{
+  "log": {
+    "loglevel": "error"
+  },
+  "inbounds": [
+    {
+      "tag": "VLESS_TCP_REALITY",
+      "listen": "127.0.0.1",
+      "port": "__PORT_TCP__",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "sockopt": {
+          "acceptProxyProtocol": true
+        },
+        "realitySettings": {
+          "target": "__SNI_TCP__:443",
+          "serverNames": ["__SNI_TCP__"],
+          "privateKey": "__REALITY_PRIVATE_KEY_TCP__",
+          "shortIds": ["__SHORT_ID_TCP__"]
+        }
+      }
+    },
+    {
+      "tag": "VLESS_GRPC_REALITY",
+      "listen": "127.0.0.1",
+      "port": "__PORT_GRPC__",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "reality",
+        "sockopt": {
+          "acceptProxyProtocol": true
+        },
+        "grpcSettings": {
+          "serviceName": "__GRPC_SERVICE_NAME__",
+          "multiMode": false
+        },
+        "realitySettings": {
+          "target": "__SNI_GRPC__:443",
+          "serverNames": ["__SNI_GRPC__"],
+          "privateKey": "__REALITY_PRIVATE_KEY_GRPC__",
+          "shortIds": ["__SHORT_ID_GRPC__"]
+        }
+      }
+    },
+    {
+      "tag": "VLESS_XHTTP_REALITY",
+      "listen": "127.0.0.1",
+      "port": "__PORT_XHTTP__",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "reality",
+        "sockopt": {
+          "acceptProxyProtocol": true
+        },
+        "xhttpSettings": {
+          "mode": "auto",
+          "path": "__XHTTP_PATH__"
+        },
+        "realitySettings": {
+          "target": "__SNI_XHTTP__:443",
+          "serverNames": ["__SNI_XHTTP__"],
+          "privateKey": "__REALITY_PRIVATE_KEY_XHTTP__",
+          "shortIds": ["__SHORT_ID_XHTTP__"]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "DIRECT",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "BLOCK",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "ip": ["geoip:private"],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "domain": ["geosite:private"],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "protocol": ["bittorrent"],
+        "outboundTag": "BLOCK"
+      }
+    ]
+  }
+}

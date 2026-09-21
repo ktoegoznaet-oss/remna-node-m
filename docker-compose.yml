@@ -1,0 +1,75 @@
+# ============================================================================
+#  Remnawave Node + nginx (SNI-маршрутизация одного публичного порта 443)
+#
+#  Оба сервиса живут в одном compose-файле намеренно: они делят сетевой стек
+#  хоста (network_mode: host), поднимаются и перезапускаются вместе, и без
+#  nginx нода недоступна снаружи. Разносить их по разным проектам смысла нет.
+#
+#  Почему network_mode: host, а не проброс портов:
+#    * nginx должен ходить на 127.0.0.1:PORT_* — те же самые loopback-адреса,
+#      на которых Xray слушает инбаунды;
+#    * Xray видит реальные сетевые интерфейсы, без двойного NAT;
+#    * секция ports: при host-режиме не используется вообще.
+# ============================================================================
+
+services:
+  remnanode:
+    container_name: remnanode
+    hostname: remnanode
+    image: remnawave/node:latest
+    network_mode: host
+    restart: always
+
+    # Нужен для управления маршрутами/сокетами внутри контейнера.
+    cap_add:
+      - NET_ADMIN
+
+    # Лимит файловых дескрипторов: каждое клиентское соединение — это сокет.
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+    environment:
+      # Значения берутся из .env (см. .env.example). В git не попадают.
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY не задан — скопируйте .env.example в .env}
+      - NODE_PORT=${NODE_PORT:-2231}
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  nginx:
+    container_name: remnanode-nginx
+    image: nginx:stable-alpine
+    network_mode: host
+    restart: always
+
+    # Не зависимость в строгом смысле (host-сеть, бэкенды резолвятся при
+    # подключении), но задаёт предсказуемый порядок старта.
+    depends_on:
+      - remnanode
+
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+    volumes:
+      # Файл генерируется из шаблона: ./scripts/configure.sh
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 443 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
