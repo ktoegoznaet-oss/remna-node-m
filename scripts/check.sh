@@ -44,19 +44,61 @@ else
   bad "443 никто не слушает — nginx не поднялся"
 fi
 
+PUBLIC_INBOUNDS=0
+MISSING_INBOUNDS=0
+
 for pair in "TCP:$PORT_TCP" "gRPC:$PORT_GRPC" "XHTTP:$PORT_XHTTP"; do
   name="${pair%%:*}"; port="${pair##*:}"
   line="$(grep -E "[^0-9]${port}\b" <<<"$LISTEN" | head -1)"
   if [[ -z "$line" ]]; then
-    bad "инбаунд $name ($port) не слушается — проверьте конфиг в панели и логи ноды"
+    MISSING_INBOUNDS=1
+    bad "инбаунд $name ($port) не слушается. Причины по убыванию частоты:
+         1. инбаунд не включён для этой ноды в панели
+            (Nodes -> нода -> список активных инбаундов);
+         2. профиль конфигурации не применён к ноде после сохранения;
+         3. Xray не смог его поднять — смотрите docker logs remnanode."
   elif grep -qE "127\.0\.0\.1:${port}\b" <<<"$line"; then
     ok "инбаунд $name ($port) слушается только на 127.0.0.1"
   else
+    PUBLIC_INBOUNDS=1
     bad "инбаунд $name ($port) торчит НАРУЖУ: $(awk '{print $4}' <<<"$line")
        В конфиге Xray должно быть \"listen\": \"127.0.0.1\".
        Иначе клиент обходит маршрутизацию по SNI и подключается напрямую."
   fi
 done
+
+if (( PUBLIC_INBOUNDS || MISSING_INBOUNDS )); then
+  echo
+  echo "  ${YELLOW}${BOLD}Похоже, нода исполняет не тот конфиг Xray, что лежит в репозитории.${OFF}"
+  echo "  Привязка к '*' вместо 127.0.0.1 — признак конфига без поля \"listen\","
+  echo "  то есть панель отдала ноде старую версию профиля."
+
+  if [[ -f xray/xray-config.json ]]; then
+    echo
+    echo "  Как должно быть (по xray/xray-config.json):"
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '.inbounds[] | "    \(.tag): \(.listen // "0.0.0.0"):\(.port)  acceptProxyProtocol=\(.streamSettings.sockopt.acceptProxyProtocol // false)"' \
+        xray/xray-config.json
+    fi
+  else
+    echo
+    echo "  Файл xray/xray-config.json не найден — сначала ./scripts/configure.sh"
+  fi
+
+  echo
+  echo "  Как есть сейчас:"
+  actual="$(ss -ltnp 2>/dev/null | grep -iE 'xray' | awk '{print "    " $4 "  " $6}' | head -10)"
+  if [[ -n "$actual" ]]; then
+    echo "$actual"
+  else
+    echo "    процесс xray не найден среди слушающих сокетов"
+    echo "    (запускайте check.sh от root — без него ss не покажет имена процессов)"
+  fi
+
+  echo
+  echo "  Лечится так: вставить xray/xray-config.json в панель ЦЕЛИКОМ,"
+  echo "  включить все три инбаунда для этой ноды, перезапустить ноду."
+fi
 
 if grep -qE "[^0-9]${NODE_PORT}\b" <<<"$LISTEN"; then
   ok "порт управления $NODE_PORT слушается (панель подключается сюда)"
@@ -80,8 +122,21 @@ fi
 
 if docker exec remnanode-nginx nginx -T 2>/dev/null | grep -q 'proxy_protocol on'; then
   ok "proxy_protocol включён (Xray получит реальный IP клиента)"
+  PP_ON=1
 else
   warn "proxy_protocol выключен — в панели все пользователи будут с 127.0.0.1"
+  PP_ON=0
+fi
+
+# Самое опасное состояние: nginx уже по-новому, Xray ещё по-старому.
+if (( PP_ON && (PUBLIC_INBOUNDS || MISSING_INBOUNDS) )); then
+  echo
+  bad "КРИТИЧНО: nginx добавляет PROXY-заголовок, а инбаунды подняты по старому
+       конфигу, без acceptProxyProtocol. В таком состоянии не подключится ни
+       один клиент: Xray примет строку 'PROXY TCP4 ...' за начало TLS-хендшейка
+       и разорвёт соединение.
+       Обе стороны включаются только вместе — таблица совместимости
+       в docs/TROUBLESHOOTING.md, раздел про PROXY protocol."
 fi
 
 # ---------------------------------------------------------------------------
