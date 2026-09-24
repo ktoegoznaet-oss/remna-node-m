@@ -108,6 +108,7 @@ sudo ./scripts/firewall.sh
 │   ├── gen-reality-keys.sh         ключи x25519 и shortId
 │   ├── configure.sh                шаблоны + .env -> боевые конфиги
 │   ├── check.sh                    диагностика
+│   ├── trace.sh                    живой просмотр: какой SNI куда уходит
 │   ├── firewall.sh                 правила ufw
 │   └── tune-sysctl.sh              сетевой тюнинг хоста (BBR и прочее)
 │

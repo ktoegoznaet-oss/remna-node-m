@@ -31,6 +31,19 @@
 ждут. Xray принимает строку `PROXY TCP4 ...` за начало TLS-хендшейка и рвёт
 соединение. Клиенты не подключатся вообще — ни через 443, ни напрямую.
 
+**Как это выглядит в логах nginx.** Тот же диагноз, вид сбоку:
+
+```
+[error] connect() failed (111: Connection refused) while proxying connection,
+client: 203.0.113.7, server: 0.0.0.0:443, upstream: "127.0.0.1:4433",
+bytes from/to client:1554/0, bytes from/to upstream:0/0
+```
+
+Читается так: nginx принял соединение, разобрал ClientHello (1554 байта от
+клиента — это настоящий клиент, а не сканер), выбрал бэкенд `127.0.0.1:4433`
+и получил отказ, потому что на этом порту никто не слушает. `to client:0` —
+клиенту не ушло ничего. Сторона nginx работает правильно, проблема за ним.
+
 **Почему один порт не слушается совсем.** Обычно инбаунд просто не включён
 для этой ноды: в Remnawave профиль конфигурации и список активных инбаундов
 ноды — разные сущности. Реже — Xray не смог его поднять; это видно в логах.
@@ -148,19 +161,17 @@ jq -r '.inbounds[].streamSettings.sockopt.acceptProxyProtocol' xray/xray-config.
 Почти всегда это рассинхрон PROXY protocol из таблицы выше. Второй по
 частоте вариант — неверный `shortId` или `publicKey` в хосте панели.
 
-Быстрая локализация: временно поставьте `access_log` в `nginx.conf` и
-посмотрите, доходит ли соединение до нужного бэкенда.
-
-```nginx
-access_log /var/log/nginx/stream.log sni_routing;
-```
+Быстрая локализация — `./scripts/trace.sh`. Он временно включает
+`access_log` в stream-секции, показывает живой поток соединений с SNI и
+выбранным бэкендом, а по Ctrl+C возвращает конфиг обратно.
 
 ```bash
-docker compose restart nginx
-docker exec remnanode-nginx tail -f /var/log/nginx/stream.log
+./scripts/trace.sh          # до Ctrl+C
+./scripts/trace.sh 60       # 60 секунд и выход
 ```
 
-Не забудьте выключить обратно: это лог активности пользователей.
+Пока трассировка включена, в лог пишутся IP клиентов и запрошенные SNI.
+Это лог активности пользователей — не оставляйте его работать постоянно.
 
 ---
 
@@ -249,9 +260,14 @@ PROXY protocol читается на уровне сокета, до HTTP/2, и 
 инбаундах, проверьте гипотезу прямо:
 
 ```bash
-# временно выключить proxy_protocol
-sed -i 's/^\( *\)proxy_protocol  on;/\1# proxy_protocol  on;/' nginx/nginx.conf
-# и одновременно в xray-config.json — acceptProxyProtocol: false во всех инбаундах
+# Временно выключить proxy_protocol.
+# Важно: правка через '>' , а не через sed -i. nginx.conf смонтирован
+# в контейнер как bind-mount одного файла, и подмена inode до контейнера
+# не дойдёт — вы будете править файл, который контейнер уже не читает.
+tmp="$(sed 's/^\( *\)proxy_protocol  on;/\1# proxy_protocol  on;/' nginx/nginx.conf)"
+printf '%s\n' "$tmp" > nginx/nginx.conf
+
+# И одновременно в панели: acceptProxyProtocol: false во всех инбаундах.
 docker compose restart nginx
 ```
 
