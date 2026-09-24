@@ -109,6 +109,7 @@ sudo ./scripts/firewall.sh
 │   ├── configure.sh                шаблоны + .env -> боевые конфиги
 │   ├── check.sh                    диагностика
 │   ├── trace.sh                    живой просмотр: какой SNI куда уходит
+│   ├── check-sni.sh                подбор домена-маски: TLS 1.3, h2, CDN, RTT
 │   ├── firewall.sh                 правила ufw
 │   └── tune-sysctl.sh              сетевой тюнинг хоста (BBR и прочее)
 │
